@@ -51,134 +51,7 @@ DOCKER_NETWORK="172.18.0"
 DOCKER_IMAGE_LABEL="newcoin-env"
 OSVERSION="$(uname -s)"
 
-docker_build_image()
-{
-    IMAGE=$(docker images -q $DOCKER_IMAGE_LABEL)
-    if [ -z $IMAGE ]; then
-        echo Building docker image
-        if [ ! -f $DOCKER_IMAGE_LABEL/Dockerfile ]; then
-            mkdir -p $DOCKER_IMAGE_LABEL
-            cat <<EOF > $DOCKER_IMAGE_LABEL/Dockerfile
-FROM ubuntu:16.04
-RUN echo deb http://ppa.launchpad.net/bitcoin/bitcoin/ubuntu xenial main >> /etc/apt/sources.list
-RUN apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv D46F45428842CE5E
-RUN apt-get update
-RUN apt-get -y install ccache git libboost-system1.58.0 libboost-filesystem1.58.0 libboost-program-options1.58.0 libboost-thread1.58.0 libboost-chrono1.58.0 libssl1.0.0 libevent-pthreads-2.0-5 libevent-2.0-5 build-essential libtool autotools-dev automake pkg-config libssl-dev libevent-dev bsdmainutils libboost-system-dev libboost-filesystem-dev libboost-chrono-dev libboost-program-options-dev libboost-test-dev libboost-thread-dev libdb4.8-dev libdb4.8++-dev libminiupnpc-dev libzmq3-dev libqt5gui5 libqt5core5a libqt5dbus5 qttools5-dev qttools5-dev-tools libprotobuf-dev protobuf-compiler libqrencode-dev python-pip
-RUN pip install construct==2.5.2 scrypt
-EOF
-        fi 
-        docker build --label $DOCKER_IMAGE_LABEL --tag $DOCKER_IMAGE_LABEL $DIRNAME/$DOCKER_IMAGE_LABEL/
-    else
-        echo Docker image already built
-    fi
-}
 
-docker_run_genesis()
-{
-    mkdir -p $DIRNAME/.ccache
-    docker run -v $DIRNAME/GenesisH0:/GenesisH0 $DOCKER_IMAGE_LABEL /bin/bash -c "$1"
-}
-
-docker_run()
-{
-    mkdir -p $DIRNAME/.ccache
-    docker run -v $DIRNAME/GenesisH0:/GenesisH0 -v $DIRNAME/.ccache:/root/.ccache -v $DIRNAME/$COIN_NAME_LOWER:/$COIN_NAME_LOWER $DOCKER_IMAGE_LABEL /bin/bash -c "$1"
-}
-
-docker_stop_nodes()
-{
-    echo "Stopping all docker nodes"
-    for id in $(docker ps -q -a  -f ancestor=$DOCKER_IMAGE_LABEL); do
-        docker stop $id
-    done
-}
-
-docker_remove_nodes()
-{
-    echo "Removing all docker nodes"
-    for id in $(docker ps -q -a  -f ancestor=$DOCKER_IMAGE_LABEL); do
-        docker rm $id
-    done
-}
-
-docker_create_network()
-{
-    echo "Creating docker network"
-    if ! docker network inspect newcoin &>/dev/null; then
-        docker network create --subnet=$DOCKER_NETWORK.0/16 newcoin
-    fi
-}
-
-docker_remove_network()
-{
-    echo "Removing docker network"
-    docker network rm newcoin
-}
-
-docker_run_node()
-{
-    local NODE_NUMBER=$1
-    local NODE_COMMAND=$2
-    mkdir -p $DIRNAME/miner${NODE_NUMBER}
-    if [ ! -f $DIRNAME/miner${NODE_NUMBER}/$COIN_NAME_LOWER.conf ]; then
-        cat <<EOF > $DIRNAME/miner${NODE_NUMBER}/$COIN_NAME_LOWER.conf
-rpcuser=${COIN_NAME_LOWER}rpc
-rpcpassword=$(cat /dev/urandom | env LC_CTYPE=C tr -dc a-zA-Z0-9 | head -c 32; echo)
-EOF
-    fi
-
-    docker run --net newcoin --ip $DOCKER_NETWORK.${NODE_NUMBER} -v $DIRNAME/miner${NODE_NUMBER}:/root/.$COIN_NAME_LOWER -v $DIRNAME/$COIN_NAME_LOWER:/$COIN_NAME_LOWER $DOCKER_IMAGE_LABEL /bin/bash -c "$NODE_COMMAND"
-}
-
-generate_genesis_block()
-{
-    if [ ! -d GenesisH0 ]; then
-        git clone $GENESISHZERO_REPOS
-        pushd GenesisH0
-    else
-        pushd GenesisH0
-        git pull
-    fi
-
-    if [ ! -f ${COIN_NAME}-main.txt ]; then
-        echo "Mining genesis block... this procedure can take many hours of cpu work.."
-        docker_run_genesis "python /GenesisH0/genesis.py -a scrypt -z \"$PHRASE\" -p $GENESIS_REWARD_PUBKEY 2>&1 | tee /GenesisH0/${COIN_NAME}-main.txt"
-    else
-        echo "Genesis block already mined.."
-        cat ${COIN_NAME}-main.txt
-    fi
-
-    if [ ! -f ${COIN_NAME}-test.txt ]; then
-        echo "Mining genesis block of test network... this procedure can take many hours of cpu work.."
-        docker_run_genesis "python /GenesisH0/genesis.py  -t 1486949366 -a scrypt -z \"$PHRASE\" -p $GENESIS_REWARD_PUBKEY 2>&1 | tee /GenesisH0/${COIN_NAME}-test.txt"
-    else
-        echo "Genesis block already mined.."
-        cat ${COIN_NAME}-test.txt
-    fi
-
-    if [ ! -f ${COIN_NAME}-regtest.txt ]; then
-        echo "Mining genesis block of regtest network... this procedure can take many hours of cpu work.."
-        docker_run_genesis "python /GenesisH0/genesis.py -t 1296688602 -b 0x207fffff -n 0 -a scrypt -z \"$PHRASE\" -p $GENESIS_REWARD_PUBKEY 2>&1 | tee /GenesisH0/${COIN_NAME}-regtest.txt"
-    else
-        echo "Genesis block already mined.."
-        cat ${COIN_NAME}-regtest.txt
-    fi
-
-    MAIN_PUB_KEY=$(cat ${COIN_NAME}-main.txt | grep "^pubkey:" | $SED 's/^pubkey: //')
-    MERKLE_HASH=$(cat ${COIN_NAME}-main.txt | grep "^merkle hash:" | $SED 's/^merkle hash: //')
-    TIMESTAMP=$(cat ${COIN_NAME}-main.txt | grep "^time:" | $SED 's/^time: //')
-    BITS=$(cat ${COIN_NAME}-main.txt | grep "^bits:" | $SED 's/^bits: //')
-
-    MAIN_NONCE=$(cat ${COIN_NAME}-main.txt | grep "^nonce:" | $SED 's/^nonce: //')
-    TEST_NONCE=$(cat ${COIN_NAME}-test.txt | grep "^nonce:" | $SED 's/^nonce: //')
-    REGTEST_NONCE=$(cat ${COIN_NAME}-regtest.txt | grep "^nonce:" | $SED 's/^nonce: //')
-
-    MAIN_GENESIS_HASH=$(cat ${COIN_NAME}-main.txt | grep "^genesis hash:" | $SED 's/^genesis hash: //')
-    TEST_GENESIS_HASH=$(cat ${COIN_NAME}-test.txt | grep "^genesis hash:" | $SED 's/^genesis hash: //')
-    REGTEST_GENESIS_HASH=$(cat ${COIN_NAME}-regtest.txt | grep "^genesis hash:" | $SED 's/^genesis hash: //')
-
-    popd
-}
 
 newcoin_replace_vars()
 {
@@ -265,18 +138,6 @@ newcoin_replace_vars()
     popd
 }
 
-build_new_coin()
-{
-    # only run autogen.sh/configure if not done previously
-    if [ ! -e $COIN_NAME_LOWER/Makefile ]; then
-        docker_run "cd /$COIN_NAME_LOWER ; bash  /$COIN_NAME_LOWER/autogen.sh"
-        docker_run "cd /$COIN_NAME_LOWER ; bash  /$COIN_NAME_LOWER/configure"
-    fi
-    # always build as the user could have manually changed some files
-    docker_run "cd /$COIN_NAME_LOWER ; make -j2"
-}
-
-
 if [ $DIRNAME =  "." ]; then
     DIRNAME=$PWD
 fi
@@ -303,11 +164,6 @@ case $OSVERSION in
     ;;
 esac
 
-
-if ! which docker &>/dev/null; then
-    echo Please install docker first
-    exit 1
-fi
 
 if ! which git &>/dev/null; then
     echo Please install git first
